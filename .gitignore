@@ -5,6 +5,7 @@ node_modules/
 # 构建产物
 dist/
 dist-ssr/
+dist-macos/
 src-tauri/target/
 src-tauri/gen/
 *.local

@@ -1,9 +1,21 @@
 name: Release
 
-# 打 tag（v1.2.3）即自动出包并发布 Release；也可以在 Actions 页手动跑一次只出产物。
+# 自动出三平台包（Windows 安装包 / macOS dmg / Android APK）：
+#   - push 到 main：自动构建三平台并上传 artifacts，不发布 Release
+#   - 打 tag v*：自动构建三平台 + 发布 GitHub Release
+#   - Actions 页 / gh workflow run：手动跑一次，只出 artifacts
+# 注意：macOS runner 的分钟数按 10 倍计费，push main 每次会触发一次三平台构建，
+# 若想只在发版时构建，删掉下面 branches: [main] 即可（tag 与手动触发仍可用）。
+# .github/** 与文档改动被 paths-ignore 排除，避免改 workflow 自身触发递归构建。
+# 注：tag push 不参与路径过滤，任何 v* tag 都会触发。
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/**"
   workflow_dispatch:
 
 concurrency:
@@ -126,11 +138,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: 生成 Android 工程
-        run: pnpm tauri android init --ci
+        run: pnpm tauri android init --ci --skip-targets-install
 
       - name: 编译 APK（按 ABI 分包）
-        run: pnpm tauri android build --apk --split-per-abi --target aarch64 armv7 x86_64
+        run: pnpm tauri android build --ci --apk --split-per-abi --target aarch64 armv7 x86_64
 
+      # 签名 keystore 是可选 secret：
+      #   配置了 ANDROID_KEY_* → 用正式 keystore 签（可上架 / 覆盖安装）
+      #   没配置 → 现场生成 CI 临时 keystore 签，APK 依然可直接安装，构建不会因此失败
       - name: 签名 APK
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
@@ -140,28 +155,43 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "::error::缺少 ANDROID_KEY_BASE64 secret，无法签名"; exit 1
-          fi
           KS="$RUNNER_TEMP/release.keystore"
-          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "使用仓库配置的正式签名"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            KS_ALIAS="$KEY_ALIAS"
+            KS_PASS="$STORE_PASSWORD"
+            KEY_PASS="${KEY_PASSWORD:-$STORE_PASSWORD}"
+            SUFFIX=""
+          else
+            echo "::warning::未配置 ANDROID_KEY_* secrets，改用 CI 临时 keystore 签名（仅供测试分发，不可用于上架）"
+            keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=HGhub CI, OU=CI, O=HGhub, L=NA, ST=NA, C=US" > /dev/null 2>&1
+            KS_ALIAS="androiddebugkey"
+            KS_PASS="android"
+            KEY_PASS="android"
+            SUFFIX="_ci-debug"
+          fi
           BT="$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)"
           APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BT/apksigner"
           mkdir -p artifacts
           found=0
-          for f in $(find src-tauri/gen/android/app/build/outputs/apk -name '*-release*.apk'); do
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
             abi="$(basename "$(dirname "$(dirname "$f")")")"
-            out="artifacts/HGhub_${VERSION}_${abi}.apk"
+            out="artifacts/HGhub_${VERSION}_${abi}${SUFFIX}.apk"
             "$APKSIGNER" sign \
-              --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
-              --ks-pass "pass:$STORE_PASSWORD" --key-pass "pass:$KEY_PASSWORD" \
+              --ks "$KS" --ks-key-alias "$KS_ALIAS" \
+              --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
               --v4-signing-enabled false \
               --out "$out" "$f"
-            "$APKSIGNER" verify --print-certs "$out" | head -3
+            "$APKSIGNER" verify "$out"
+            echo "signed: $out"
             found=$((found+1))
-          done
+          done < <(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | sort)
           rm -f "$KS"
-          if [ "$found" -eq 0 ]; then echo "::error::没有找到 release APK"; exit 1; fi
+          if [ "$found" -eq 0 ]; then echo "::error::没有找到 APK"; exit 1; fi
           ls -lh artifacts
 
       - uses: actions/upload-artifact@v4
