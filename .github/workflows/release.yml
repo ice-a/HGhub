@@ -16,6 +16,8 @@ on:
       - "**/*.md"
       - "docs/**"
       - ".github/**"
+      - ".gitignore"
+      - "LICENSE"
   workflow_dispatch:
 
 concurrency:

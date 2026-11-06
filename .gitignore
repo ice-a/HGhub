@@ -6,6 +6,7 @@ node_modules/
 dist/
 dist-ssr/
 dist-macos/
+dist-ci/
 src-tauri/target/
 src-tauri/gen/
 *.local
