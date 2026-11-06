@@ -1,0 +1,63 @@
+name: macOS DMG
+
+# 只打 macOS 包：Windows 本机编不了 .app / .dmg（需要 macOS + Xcode CLT + hdiutil），
+# 因此用 GitHub 的 macOS runner 出包，产物作为 artifact 下载。
+# 触发：Actions 页手动运行，或 `gh workflow run macos-dmg.yml`。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: macos-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  # 无 Apple Developer 证书时用 ad-hoc 签名，不做公证
+  APPLE_SIGNING_IDENTITY: "-"
+
+jobs:
+  macos:
+    name: macOS (app + dmg, universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: macos-universal
+
+      - run: pnpm install --frozen-lockfile
+
+      # bundle 目标来自 tauri.macos.conf.json（app + dmg），无需 --bundles
+      - name: 构建 app + dmg（Intel + Apple Silicon 通用包）
+        run: pnpm tauri build --ci --target universal-apple-darwin
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          B="src-tauri/target/universal-apple-darwin/release/bundle"
+          mkdir -p artifacts
+          for f in "$B"/dmg/*.dmg; do cp "$f" artifacts/; done
+          for a in "$B"/macos/*.app; do
+            ditto -c -k --sequesterRsrc --keepParent "$a" "artifacts/HGhub_${V}_universal.app.zip"
+          done
+          ls -lh artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: artifacts/*
+          if-no-files-found: error
